@@ -2,7 +2,16 @@ from discord.ext import commands
 from discord import app_commands
 import discord
 
-from db import get_player, ladder_join_db, ladder_withdraw_db, list_ladder, initiator_cooldown_until, defender_protection_until, get_map_pool
+from db import (
+    get_player,
+    ladder_join_db,
+    ladder_withdraw_db,
+    list_ladder,
+    initiator_cooldown_until,
+    defender_protection_until,
+    get_map_pool,
+    can_challenge,
+)
 from roles import recompute_and_sync_roles
 from utils import utcnow
 
@@ -96,6 +105,68 @@ class LadderCog(commands.Cog):
             "**Current Map Pool**\n" + "\n".join(lines),
             ephemeral=True
         )
+
+    @app_commands.command(
+        name="players",
+        description="Show players from rank 1 to X and whether you can challenge them."
+    )
+    @app_commands.describe(limit="Show ranks 1 to this number (default 30, max 100)")
+    async def players(self, interaction: discord.Interaction, limit: int = 30):
+        assert interaction.guild
+
+        limit = max(1, min(limit, 100))
+
+        me = await get_player(interaction.guild.id, interaction.user.id)
+        if not me or me["is_active"] != 1:
+            await interaction.response.send_message(
+                "You must be on the ladder to use this command. Use /join first.",
+                ephemeral=True,
+            )
+            return
+
+        rows = await list_ladder(interaction.guild.id, limit)
+        if not rows:
+            await interaction.response.send_message("Ladder is empty.", ephemeral=True)
+            return
+
+        lines = []
+        for uid, pos, tier in rows:
+            member = interaction.guild.get_member(uid)
+            display = member.display_name if member else f"User {uid}"
+
+            if uid == interaction.user.id:
+                lines.append(f"`#{pos:>2}` **{display}** [{tier}] — you")
+                continue
+
+            ok, reason = await can_challenge(interaction.guild.id, interaction.user.id, uid)
+
+            if ok:
+                status = "✅ AVAILABLE"
+            else:
+                status = f"❌ {reason}"
+
+            lines.append(f"`#{pos:>2}` **{display}** [{tier}] — {status}")
+
+        # Discord message length safety
+        message = "**Players**\n" + "\n".join(lines)
+        if len(message) > 1900:
+            chunks = []
+            current = "**Players**\n"
+            for line in lines:
+                if len(current) + len(line) + 1 > 1900:
+                    chunks.append(current)
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current:
+                chunks.append(current)
+
+            await interaction.response.send_message(chunks[0], ephemeral=True)
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk, ephemeral=True)
+            return
+
+        await interaction.response.send_message(message, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LadderCog(bot))

@@ -22,7 +22,10 @@ async def init_db():
 
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
-                map_pool_json TEXT NOT NULL
+                map_pool_json TEXT NOT NULL,
+                initiator_cooldown_days INTEGER NOT NULL DEFAULT 2,
+                defender_protection_days INTEGER NOT NULL DEFAULT 7,
+                rematch_required_others INTEGER NOT NULL DEFAULT 2
             );
 
             CREATE TABLE IF NOT EXISTS players (
@@ -82,6 +85,83 @@ async def init_db():
         )
         await db.commit()
 
+# -------------------- Settings: server config ---------------
+async def ensure_guild_settings(guild_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT guild_id FROM guild_settings WHERE guild_id=?", (guild_id,))
+        row = await cur.fetchone()
+        if row:
+            return
+
+        await db.execute(
+            """
+            INSERT INTO guild_settings (
+                guild_id,
+                map_pool_json,
+                initiator_cooldown_days,
+                defender_protection_days,
+                rematch_required_others
+            )
+            VALUES (?, ?, 2, 7, 2)
+            """,
+            (guild_id, json.dumps(DEFAULT_MAP_POOL)),
+        )
+        await db.commit()
+
+async def get_rules(guild_id: int) -> dict:
+    await ensure_guild_settings(guild_id)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT initiator_cooldown_days, defender_protection_days, rematch_required_others
+            FROM guild_settings
+            WHERE guild_id=?
+            """,
+            (guild_id,),
+        )
+        row = await cur.fetchone()
+
+    return {
+        "initiator_cooldown_days": int(row[0]),
+        "defender_protection_days": int(row[1]),
+        "rematch_required_others": int(row[2]),
+    }
+
+async def set_rules(
+    guild_id: int,
+    initiator_cooldown_days: int | None = None,
+    defender_protection_days: int | None = None,
+    rematch_required_others: int | None = None,
+):
+    await ensure_guild_settings(guild_id)
+
+    fields = []
+    params = []
+
+    if initiator_cooldown_days is not None:
+        fields.append("initiator_cooldown_days=?")
+        params.append(initiator_cooldown_days)
+
+    if defender_protection_days is not None:
+        fields.append("defender_protection_days=?")
+        params.append(defender_protection_days)
+
+    if rematch_required_others is not None:
+        fields.append("rematch_required_others=?")
+        params.append(rematch_required_others)
+
+    if not fields:
+        return
+
+    params.append(guild_id)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"UPDATE guild_settings SET {', '.join(fields)} WHERE guild_id=?",
+            tuple(params),
+        )
+        await db.commit()
 
 # -------------------- Settings: map pool --------------------
 async def get_map_pool(guild_id: int) -> List[str]:
@@ -316,7 +396,8 @@ async def initiator_cooldown_until(guild_id: int, user_id: int) -> Optional[dt.d
         if not row:
             return None
         played_at = dt.datetime.fromisoformat(row[0])
-        return played_at + dt.timedelta(days=INITIATOR_COOLDOWN_DAYS)
+        rules = await get_rules(guild_id)
+        return played_at + dt.timedelta(days=rules["initiator_cooldown_days"])
 
 
 async def defender_protection_until(guild_id: int, user_id: int) -> Optional[dt.datetime]:
@@ -335,7 +416,8 @@ async def defender_protection_until(guild_id: int, user_id: int) -> Optional[dt.
         if not row:
             return None
         played_at = dt.datetime.fromisoformat(row[0])
-        return played_at + dt.timedelta(days=DEFENDER_PROTECTION_DAYS)
+        rules = await get_rules(guild_id)
+        return played_at + dt.timedelta(days=rules["defender_protection_days"])
 
 
 async def get_last_match(guild_id: int) -> Optional[Tuple[int, int]]:
@@ -386,7 +468,8 @@ async def challenger_rematch_spacing_ok(guild_id: int, challenger_id: int, defen
             (guild_id, challenger_id, last_id, defender_id),
         )
         defenders = await cur2.fetchall()
-        return len(defenders) >= REMATCH_DISTINCT_DEFENDERS_REQUIRED
+        rules = await get_rules(guild_id)
+        return len(defenders) >= rules["rematch_required_others"]
 
 
 # -------------------- Challenges --------------------
