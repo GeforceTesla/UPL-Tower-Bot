@@ -1,15 +1,26 @@
+import aiosqlite
+import db
 from discord.ext import commands
 from discord import app_commands
 import discord
-
-from utils import is_admin_interaction
+import re
+from roles import recompute_and_sync_roles
+from utils import (
+    is_admin_interaction,
+    parse_duration,
+)
 from db import (
     get_map_pool,
     set_map_pool,
     get_rules,
     set_rules,
+    ensure_player_row,
 )
-from config import DEFAULT_MAP_POOL
+from config import (
+    DEFAULT_MAP_POOL,
+)
+
+MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -25,49 +36,66 @@ class AdminCog(commands.Cog):
         rules = await get_rules(interaction.guild.id)
         await interaction.response.send_message(
             f"**Current Rules**\n"
-            f"- Initiator cooldown days: **{rules['initiator_cooldown_days']}**\n"
-            f"- Defender protection days: **{rules['defender_protection_days']}**\n"
-            f"- Other defenders required before rematch: **{rules['rematch_required_others']}**",
+            f"- Initiator cooldown: **{rules['initiator_cooldown_seconds']}s**\n"
+            f"- Defender protection: **{rules['defender_protection_seconds']}s**\n"
+            f"- Other defenders required before rematch: **{rules['rematch_required_others']}**\n"
+            f"- Players per bracket: **{rules['bracket_size']}**",
             ephemeral=True,
         )
 
-    @app_commands.command(name="admin_set_rules", description="[Admin] Set ladder cooldown and rematch rules.")
+    @app_commands.command(name="admin_set_rules", description="[Admin] Configure ladder cooldown, rematch, and bracket rules.")
     @app_commands.describe(
-        initiator_days="Days before a challenger can initiate again",
-        defender_days="Days a defender is protected from being challenged again",
+        initiator_cd="Cooldown before a challenger can initiate again (30s, 10m, 2h, 1d, 1d12h)",
+        defender_cd="Protection time for defenders after a match (30s, 10m, 2h, 1d)",
         rematch_count="Number of other defenders required before re-challenging the same player",
+        bracket_size="Players per bracket (example: 6 means 6 players each in S/A/B/C/D/E)"
     )
     async def admin_set_rules(
         self,
         interaction: discord.Interaction,
-        initiator_days: int,
-        defender_days: int,
+        initiator_cd: str,
+        defender_cd: str,
         rematch_count: int,
+        bracket_size: int,
     ):
         assert interaction.guild
         if not is_admin_interaction(interaction.user):
-            await interaction.response.send_message("Admin only (Manage Server).", ephemeral=True)
+            await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
-        if initiator_days < 0 or defender_days < 0 or rematch_count < 0:
+        if rematch_count < 0 or bracket_size <= 0:
             await interaction.response.send_message(
-                "All values must be 0 or greater.",
+                "rematch_count must be 0 or greater, and bracket_size must be greater than 0.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            initiator_seconds = parse_duration(initiator_cd)
+            defender_seconds = parse_duration(defender_cd)
+        except ValueError:
+            await interaction.response.send_message(
+                "Invalid duration. Example: 30s, 10m, 2h, 1d",
                 ephemeral=True,
             )
             return
 
         await set_rules(
             interaction.guild.id,
-            initiator_cooldown_days=initiator_days,
-            defender_protection_days=defender_days,
+            initiator_cooldown_seconds=initiator_seconds,
+            defender_protection_seconds=defender_seconds,
             rematch_required_others=rematch_count,
+            bracket_size=bracket_size,
         )
+
+        await recompute_and_sync_roles(self.bot, interaction.guild.id)
 
         await interaction.response.send_message(
             f"**Rules updated**\n"
-            f"- Initiator cooldown days: **{initiator_days}**\n"
-            f"- Defender protection days: **{defender_days}**\n"
-            f"- Other defenders required before rematch: **{rematch_count}**",
+            f"- Initiator cooldown: **{initiator_cd}**\n"
+            f"- Defender protection: **{defender_cd}**\n"
+            f"- Other defenders required before rematch: **{rematch_count}**\n"
+            f"- Players per bracket: **{bracket_size}**",
             ephemeral=True,
         )
 
@@ -85,26 +113,34 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("Admin only (Manage Server).", ephemeral=True)
             return
 
-        lines = [line.strip() for line in ladder_text.splitlines() if line.strip()]
-        if not lines:
-            await interaction.response.send_message("No players found in input.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        tokens = []
+        for line in ladder_text.splitlines():
+            for part in line.split(","):
+                part = part.strip()
+                if part:
+                    tokens.append(part)
+
+        if not tokens:
+            await interaction.followup.send("No players found in input.", ephemeral=True)
             return
 
         ordered_user_ids: list[int] = []
         seen: set[int] = set()
 
-        for line in lines:
-            m = MENTION_RE.search(line)
+        for token in tokens:
+            m = MENTION_RE.search(token)
             if not m:
-                await interaction.response.send_message(
-                    f"Could not parse a user mention from line: `{line}`",
+                await interaction.followup.send(
+                    f"Could not parse a user mention from token: `{token}`",
                     ephemeral=True,
                 )
                 return
 
             uid = int(m.group(1))
             if uid in seen:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Duplicate player found: <@{uid}>",
                     ephemeral=True,
                 )
@@ -115,7 +151,7 @@ class AdminCog(commands.Cog):
                 try:
                     member = await interaction.guild.fetch_member(uid)
                 except Exception:
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"User not found in this server: <@{uid}>",
                         ephemeral=True,
                     )
@@ -132,11 +168,11 @@ class AdminCog(commands.Cog):
             await ensure_player_row(interaction.guild.id, member.id, member.display_name)
 
         # Replace active ladder with this exact ordering
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN")
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("BEGIN")
 
             # Withdraw everyone first
-            await db.execute(
+            await conn.execute(
                 """
                 UPDATE players
                 SET is_active=0, ladder_pos=NULL
@@ -151,7 +187,7 @@ class AdminCog(commands.Cog):
                 if member is None:
                     member = await interaction.guild.fetch_member(uid)
 
-                await db.execute(
+                await conn.execute(
                     """
                     UPDATE players
                     SET display_name=?, is_active=1, ladder_pos=?
@@ -160,7 +196,7 @@ class AdminCog(commands.Cog):
                     (member.display_name, pos, interaction.guild.id, uid),
                 )
 
-            await db.commit()
+            await conn.commit()
 
         await recompute_and_sync_roles(self.bot, interaction.guild.id)
 
@@ -172,7 +208,7 @@ class AdminCog(commands.Cog):
         if len(ordered_user_ids) > 20:
             extra = f"\n...and {len(ordered_user_ids) - 20} more"
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Ladder initialized with **{len(ordered_user_ids)}** players.\n\n{preview}{extra}",
             ephemeral=True,
         )

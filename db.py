@@ -1,3 +1,4 @@
+import os
 import json
 import asyncio
 import datetime as dt
@@ -7,11 +8,10 @@ import aiosqlite
 
 from config import (
     DB_PATH, DEFAULT_MAP_POOL, TIERS,
-    INITIATOR_COOLDOWN_DAYS, DEFENDER_PROTECTION_DAYS,
-    REMATCH_DISTINCT_DEFENDERS_REQUIRED,
 )
-from utils import utcnow, tier_for_position, tier_index
+from utils import utcnow, tier_for_position, tier_index, discord_ts
 
+DB_PATH = os.environ.get("CHALLENGE_DB", DB_PATH)
 
 # -------------------- DB init (NO migrations) --------------------
 async def init_db():
@@ -23,9 +23,10 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 map_pool_json TEXT NOT NULL,
-                initiator_cooldown_days INTEGER NOT NULL DEFAULT 2,
-                defender_protection_days INTEGER NOT NULL DEFAULT 7,
-                rematch_required_others INTEGER NOT NULL DEFAULT 2
+                initiator_cooldown_seconds INTEGER NOT NULL DEFAULT 172800,
+                defender_protection_seconds INTEGER NOT NULL DEFAULT 604800,
+                rematch_required_others INTEGER NOT NULL DEFAULT 2,
+                bracket_size INTEGER NOT NULL DEFAULT 6
             );
 
             CREATE TABLE IF NOT EXISTS players (
@@ -98,11 +99,12 @@ async def ensure_guild_settings(guild_id: int):
             INSERT INTO guild_settings (
                 guild_id,
                 map_pool_json,
-                initiator_cooldown_days,
-                defender_protection_days,
-                rematch_required_others
+                initiator_cooldown_seconds,
+                defender_protection_seconds,
+                rematch_required_others,
+                bracket_size
             )
-            VALUES (?, ?, 2, 7, 2)
+            VALUES (?, ?, 172800, 604800, 2, 6)
             """,
             (guild_id, json.dumps(DEFAULT_MAP_POOL)),
         )
@@ -114,7 +116,11 @@ async def get_rules(guild_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
-            SELECT initiator_cooldown_days, defender_protection_days, rematch_required_others
+            SELECT
+                initiator_cooldown_seconds,
+                defender_protection_seconds,
+                rematch_required_others,
+                bracket_size
             FROM guild_settings
             WHERE guild_id=?
             """,
@@ -123,33 +129,39 @@ async def get_rules(guild_id: int) -> dict:
         row = await cur.fetchone()
 
     return {
-        "initiator_cooldown_days": int(row[0]),
-        "defender_protection_days": int(row[1]),
+        "initiator_cooldown_seconds": int(row[0]),
+        "defender_protection_seconds": int(row[1]),
         "rematch_required_others": int(row[2]),
+        "bracket_size": int(row[3]),
     }
 
 async def set_rules(
     guild_id: int,
-    initiator_cooldown_days: int | None = None,
-    defender_protection_days: int | None = None,
+    initiator_cooldown_seconds: int | None = None,
+    defender_protection_seconds: int | None = None,
     rematch_required_others: int | None = None,
+    bracket_size: int | None = None,
 ):
     await ensure_guild_settings(guild_id)
 
     fields = []
     params = []
 
-    if initiator_cooldown_days is not None:
-        fields.append("initiator_cooldown_days=?")
-        params.append(initiator_cooldown_days)
+    if initiator_cooldown_seconds is not None:
+        fields.append("initiator_cooldown_seconds=?")
+        params.append(initiator_cooldown_seconds)
 
-    if defender_protection_days is not None:
-        fields.append("defender_protection_days=?")
-        params.append(defender_protection_days)
+    if defender_protection_seconds is not None:
+        fields.append("defender_protection_seconds=?")
+        params.append(defender_protection_seconds)
 
     if rematch_required_others is not None:
         fields.append("rematch_required_others=?")
         params.append(rematch_required_others)
+
+    if bracket_size is not None:
+        fields.append("bracket_size=?")
+        params.append(bracket_size)
 
     if not fields:
         return
@@ -261,6 +273,9 @@ async def recompute_tiers_db_only(guild_id: int):
       2) Shift all active ladder_pos upward by +10000 (freeing 1..N)
       3) Assign new ladder_pos sequentially (safe because old values are 10000+)
     """
+    rules = await get_rules(guild_id)
+    bracket_size = rules["bracket_size"]
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN")
 
@@ -295,7 +310,7 @@ async def recompute_tiers_db_only(guild_id: int):
 
         # Assign new positions + tiers (safe because current positions are 10000+)
         for idx, uid in enumerate(user_ids, start=1):
-            tier = tier_for_position(idx)
+            tier = tier_for_position(idx, bracket_size)
             await db.execute(
                 "UPDATE players SET ladder_pos=?, tier=? WHERE guild_id=? AND user_id=?",
                 (idx, tier, guild_id, uid),
@@ -397,7 +412,7 @@ async def initiator_cooldown_until(guild_id: int, user_id: int) -> Optional[dt.d
             return None
         played_at = dt.datetime.fromisoformat(row[0])
         rules = await get_rules(guild_id)
-        return played_at + dt.timedelta(days=rules["initiator_cooldown_days"])
+        return played_at + dt.timedelta(seconds=rules["initiator_cooldown_seconds"])
 
 
 async def defender_protection_until(guild_id: int, user_id: int) -> Optional[dt.datetime]:
@@ -417,7 +432,7 @@ async def defender_protection_until(guild_id: int, user_id: int) -> Optional[dt.
             return None
         played_at = dt.datetime.fromisoformat(row[0])
         rules = await get_rules(guild_id)
-        return played_at + dt.timedelta(days=rules["defender_protection_days"])
+        return played_at + dt.timedelta(seconds=rules["defender_protection_seconds"])
 
 
 async def get_last_match(guild_id: int) -> Optional[Tuple[int, int]]:
@@ -439,8 +454,15 @@ async def get_last_match(guild_id: int) -> Optional[Tuple[int, int]]:
 
 
 async def challenger_rematch_spacing_ok(guild_id: int, challenger_id: int, defender_id: int) -> bool:
+    rules = await get_rules(guild_id)
+    rematch_required = rules["rematch_required_others"]
+
+    # If set to 0, fully disable rematch spacing restrictions.
+    if rematch_required <= 0:
+        return True
+
     last = await get_last_match(guild_id)
-    if last and set(last) == {challenger_id, defender_id}:
+    if last and {int(last[0]), int(last[1])} == {challenger_id, defender_id}:
         return False
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -468,8 +490,8 @@ async def challenger_rematch_spacing_ok(guild_id: int, challenger_id: int, defen
             (guild_id, challenger_id, last_id, defender_id),
         )
         defenders = await cur2.fetchall()
-        rules = await get_rules(guild_id)
-        return len(defenders) >= rules["rematch_required_others"]
+
+    return len(defenders) >= rematch_required
 
 
 # -------------------- Challenges --------------------
@@ -529,20 +551,30 @@ async def can_challenge(guild_id: int, challenger_id: int, defender_id: int) -> 
 
     cd = await initiator_cooldown_until(guild_id, challenger_id)
     if cd and cd > utcnow():
-        return False, f"Initiator cooldown: you can challenge again after {cd.isoformat()}."
+        return False, f"Initiator cooldown: you can challenge again after {discord_ts(cd)}."
 
     prot = await defender_protection_until(guild_id, defender_id)
     if prot and prot > utcnow():
-        return False, f"Defender protection: that player can’t be challenged until {prot.isoformat()}."
+        return False, f"Defender protection: that player can’t be challenged until {discord_ts(prot)}."
 
     if await get_open_challenge(guild_id, challenger_id):
         return False, "You already have an active challenge."
     if await get_open_challenge(guild_id, defender_id):
         return False, "That player already has an active challenge."
 
-    if not await challenger_rematch_spacing_ok(guild_id, challenger_id, defender_id):
-        return False, "Rematch rule: you can’t play the same opponent twice in a row, and you must face 2 other defenders before re-challenging them."
+    rules = await get_rules(guild_id)
+    rematch_required = rules["rematch_required_others"]
 
+    if not await challenger_rematch_spacing_ok(guild_id, challenger_id, defender_id):
+        rules = await get_rules(guild_id)
+        rematch_required = rules["rematch_required_others"]
+
+        if rematch_required <= 0:
+            return False, "Rematch rule: you can’t play the same opponent twice in a row."
+        elif rematch_required == 1:
+            return False, "Rematch rule: you can’t play the same opponent twice in a row, and you must face 1 other defender before re-challenging them."
+        else:
+            return False, f"Rematch rule: you can’t play the same opponent twice in a row, and you must face {rematch_required} other defenders before re-challenging them."
     return True, "OK"
 
 
@@ -570,6 +602,44 @@ async def eligible_defenders(guild_id: int, challenger_id: int) -> List[int]:
             out.append(int(uid))
     return out
 
+async def get_challenge_by_thread_id(guild_id: int, thread_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT id, status, created_at, challenger_id, defender_id,
+                   challenger_ban, defender_ban, game1_map,
+                   thread_id, map_pool_json
+            FROM challenges
+            WHERE guild_id=? AND thread_id=? AND status IN ('PENDING','READY')
+            LIMIT 1
+            """,
+            (guild_id, thread_id),
+        )
+        row = await cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": int(row[0]),
+        "status": str(row[1]),
+        "created_at": str(row[2]),
+        "challenger_id": int(row[3]),
+        "defender_id": int(row[4]),
+        "challenger_ban": row[5],
+        "defender_ban": row[6],
+        "game1_map": row[7],
+        "thread_id": row[8],
+        "map_pool": json.loads(row[9]) if row[9] else [],
+    }
+
+async def set_challenge_thread_id(guild_id: int, challenge_id: int, thread_id: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE challenges SET thread_id=? WHERE guild_id=? AND id=?",
+            (thread_id, guild_id, challenge_id),
+        )
+        await conn.commit()
 
 async def create_challenge(
     guild_id: int,
@@ -602,7 +672,7 @@ async def set_challenge_thread_id(guild_id: int, challenge_id: int, thread_id: i
         await db.commit()
 
 async def update_challenge(guild_id: int, challenge_id: int, **kwargs):
-    allowed = {"challenger_ban", "defender_ban", "game1_map", "status"}
+    allowed = {"challenger_ban", "defender_ban", "game1_map", "status", "thread_id"}
     fields = []
     params = []
     for k, v in kwargs.items():

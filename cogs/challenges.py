@@ -1,5 +1,6 @@
 import json
 from typing import Optional
+import db
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -77,7 +78,8 @@ async def create_challenge_thread(
             f"1) Challenger: `/ban <map name>`\n"
             f"2) Defender: `/ban <map name>`\n"
             f"3) Defender: `/pickmap <map name>` (sets Game 1)\n"
-            f"4) After match: `/report score:2-1` (attach replay or provide `replay_url`)\n\n"
+            f"4) After match: `/report winner:@Player games_won:2 games_lost:1`\n"
+            f"   Optional: attach replay or provide `replay_url`\n\n"
             f"Useful:\n"
             f"- `/mychallenge` shows your active challenge state\n"
             f"- `/eligible` shows who you can challenge\n"
@@ -234,9 +236,11 @@ class ChallengesCog(commands.Cog):
         await interaction.response.send_message("Challenge canceled.")
         await post_to_thread(interaction.guild, ch.get("thread_id"), "❌ Challenge canceled.")
 
-    @app_commands.command(name="report", description="Report result for your active challenge (BO3).")
+    @app_commands.command(name="report", description="Report the result of your active challenge.")
     @app_commands.describe(
-        score="BO3 score like 2-1 from challenger perspective",
+        winner="The winner of the match",
+        games_won="Winner's game count (must be 2 in a BO3)",
+        games_lost="Loser's game count (0 or 1 in a BO3)",
         replay="Optional replay file upload",
         replay_url="Optional replay link",
         notes="Optional notes",
@@ -244,70 +248,115 @@ class ChallengesCog(commands.Cog):
     async def report(
         self,
         interaction: discord.Interaction,
-        score: str,
+        winner: discord.Member,
+        games_won: int,
+        games_lost: int,
         replay: Optional[discord.Attachment] = None,
         replay_url: Optional[str] = None,
         notes: Optional[str] = None,
     ):
         assert interaction.guild
-        ch = await get_open_challenge(interaction.guild.id, interaction.user.id)
+
+        ch = None
+
+        if interaction.channel_id is not None:
+            ch = await db.get_challenge_by_thread_id(interaction.guild.id, interaction.channel_id)
+
+        if ch is None:
+            ch = await db.get_open_challenge(interaction.guild.id, interaction.user.id)
+
         if not ch:
-            await interaction.response.send_message("You have no active challenge.", ephemeral=True)
-            return
-        if interaction.user.id not in (ch["challenger_id"], ch["defender_id"]):
-            await interaction.response.send_message("You are not a participant.", ephemeral=True)
-            return
-
-        try:
-            cs, ds = parse_score(score)
-        except Exception as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
+            await interaction.response.send_message(
+                "You have no active challenge.",
+                ephemeral=True,
+            )
             return
 
-        # Prefer uploaded replay file if present
+        challenger_id = ch["challenger_id"]
+        defender_id = ch["defender_id"]
+
+        if interaction.user.id not in (challenger_id, defender_id):
+            await interaction.response.send_message(
+                "Only the challenger or defender can report this match.",
+                ephemeral=True,
+            )
+            return
+
+        if winner.id not in (challenger_id, defender_id):
+            await interaction.response.send_message(
+                "The winner must be one of the two players in this challenge.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate BO3 score
+        if games_won != 2 or games_lost not in (0, 1):
+            await interaction.response.send_message(
+                "Invalid BO3 score. Use winner games_won=2 and games_lost=0 or 1.",
+                ephemeral=True,
+            )
+            return
+
         if not replay_url and replay is not None:
             replay_url = replay.url
 
-        winner_id = ch["challenger_id"] if cs > ds else ch["defender_id"]
-        loser_id = ch["defender_id"] if winner_id == ch["challenger_id"] else ch["challenger_id"]
+        if winner.id == challenger_id:
+            loser_id = defender_id
+            challenger_score = games_won
+            defender_score = games_lost
+        else:
+            loser_id = challenger_id
+            challenger_score = games_lost
+            defender_score = games_won
 
         try:
-            await complete_challenge_to_match(
+            await db.complete_challenge_to_match(
                 interaction.guild.id,
                 ch["id"],
-                challenger_score=cs,
-                defender_score=ds,
+                challenger_score=challenger_score,
+                defender_score=defender_score,
                 replay_url=replay_url,
                 notes=notes,
             )
 
-            # IMPORTANT: settle bets + winner +50
-            from db import settle_bets_and_rewards  # keep local import to avoid circulars
-            await settle_bets_and_rewards(interaction.guild.id, ch["id"], winner_id)
+            await db.settle_bets_and_rewards(
+                interaction.guild.id,
+                ch["id"],
+                winner.id,
+            )
 
-            await swap_positions_by_result(interaction.guild.id, winner_id, loser_id)
+            if winner.id == challenger_id:
+                await db.swap_positions_by_result(
+                    interaction.guild.id,
+                    winner.id,
+                    loser_id,
+                )
+
             await recompute_and_sync_roles(self.bot, interaction.guild.id)
+
         except Exception as e:
-            await interaction.response.send_message(f"Failed: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"Failed: {e}",
+                ephemeral=True,
+            )
             return
 
+        winner_member = interaction.guild.get_member(winner.id)
+        loser_member = interaction.guild.get_member(loser_id)
+
+        winner_name = winner_member.display_name if winner_member else f"<@{winner.id}>"
+        loser_name = loser_member.display_name if loser_member else f"<@{loser_id}>"
+
+        rank_note = "Ladder position swapped." if winner.id == challenger_id else "No ladder swap (defender held position)."
+
         await interaction.response.send_message(
-            f"Result recorded.\nWinner: <@{winner_id}>\nScore (challenger-defender): **{cs}-{ds}**\nReplay: {replay_url or '—'}"
+            f"Result recorded.\n"
+            f"**{winner_name}** defeated **{loser_name}** **{games_won}-{games_lost}**.\n"
+            f"{rank_note}\n"
+            f"Replay: {replay_url or '—'}"
         )
 
         thread_id = ch.get("thread_id")
-
-        await post_to_thread(
-            interaction.guild,
-            thread_id,
-            f"✅ **Result recorded**\n"
-            f"<@{ch['challenger_id']}> vs <@{ch['defender_id']}> **{cs}-{ds}**\n"
-            f"Winner: <@{winner_id}>\n"
-            f"Replay: {replay_url or '—'}\n\n"
-            f"🔒 Thread closed.",
-        )
-
-        # Close thread
         if thread_id:
             try:
                 thread = interaction.guild.get_channel(thread_id)
@@ -315,10 +364,17 @@ class ChallengesCog(commands.Cog):
                     thread = await interaction.guild.fetch_channel(thread_id)
 
                 if isinstance(thread, discord.Thread):
+                    await thread.send(
+                        f"✅ **Result recorded**\n"
+                        f"Winner: <@{winner.id}>\n"
+                        f"Score: **{games_won}-{games_lost}**\n"
+                        f"Replay: {replay_url or '—'}\n\n"
+                        f"🔒 Thread closed."
+                    )
                     await thread.edit(
                         archived=True,
                         locked=True,
-                        reason="Match reported"
+                        reason="Match reported",
                     )
             except Exception:
                 pass

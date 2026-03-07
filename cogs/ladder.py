@@ -132,6 +132,11 @@ class LadderCog(commands.Cog):
         lines = []
         for uid, pos, tier in rows:
             member = interaction.guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await interaction.guild.fetch_member(uid)
+                except Exception:
+                    member = None
             display = member.display_name if member else f"User {uid}"
 
             if uid == interaction.user.id:
