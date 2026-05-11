@@ -39,12 +39,46 @@ pip install -r requirements.txt
 
 # Discord Bot Setup
 
-## Discord Permissions
+1. Go to Discord Developer Portal
+https://discord.com/developers/applications
+2. Click New Application → name it.
+
+## Left side: Bot Section
+
+### Under Privileged Gateway Intents
+Enable the following intents:
+```
+Enable Server Members Intent.
+Enable Message Content Intent.
+```
+
+### In Bot Permissions
+```
+Manage Roles
+Send Messages
+Create Publis Threads
+Send Message in Threads
+Manage Threads
+Read Message History
+View Channels
+Embed Links
+Attach Files
+Use Slash Commands
+```
+
+Copy the Bot Token. Keep it secret.
+
+## Left side: OAuth2
+
+### Select Scopes
 
 ```
 bot
 applications.commands
-Select permissions
+```
+
+### In Bot Permissions
+```
 View Channels
 Send Messages
 Read Message History
@@ -53,6 +87,21 @@ Send Messages in Threads
 Manage Threads
 Manage Roles
 Attach Files
+```
+Open the generated invite URL and add the bot to your server.
+
+## After Adding the Bot
+
+### Manage Bot Role
+```
+In your own Discord server -> Server Settings -> Roles:
+    Drag the bot's role to above the S Rankers, A Rankers ... etc role.
+```
+
+### Restrict Bot to One Channel
+```
+    In desired channel:
+        Edit Channel → Permissions
 ```
 
 # Environment Variables
