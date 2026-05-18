@@ -273,3 +273,88 @@ async def test_admin_seed_ladder_rejects_duplicate_players(fresh_db, admin_cog, 
     args, kwargs = interaction.followup.send.await_args
     assert "Duplicate player found" in args[0]
     assert kwargs["ephemeral"] is True
+
+@pytest.mark.asyncio
+async def test_admin_swap_players_swaps_positions(fresh_db):
+    guild_id = 1
+
+    await db.ladder_join_db(guild_id, 1, "Alpha")
+    await db.ladder_join_db(guild_id, 2, "Beta")
+
+    p1_before = await db.get_player(guild_id, 1)
+    p2_before = await db.get_player(guild_id, 2)
+
+    assert p1_before["ladder_pos"] == 1
+    assert p2_before["ladder_pos"] == 2
+
+    await db.admin_swap_players(
+        guild_id=guild_id,
+        admin_id=999,
+        player_a_id=1,
+        player_b_id=2,
+        reason="Misreported result",
+    )
+
+    p1_after = await db.get_player(guild_id, 1)
+    p2_after = await db.get_player(guild_id, 2)
+
+    assert p1_after["ladder_pos"] == 2
+    assert p2_after["ladder_pos"] == 1
+
+@pytest.mark.asyncio
+async def test_admin_swap_players_creates_admin_event(fresh_db):
+    guild_id = 1
+
+    await db.ladder_join_db(guild_id, 1, "Alpha")
+    await db.ladder_join_db(guild_id, 2, "Beta")
+
+    await db.admin_swap_players(
+        guild_id=guild_id,
+        admin_id=777,
+        player_a_id=1,
+        player_b_id=2,
+        reason="Manual correction",
+    )
+
+    events = await db.get_history_events(guild_id, limit=10)
+
+    swap_events = [e for e in events if e["type"] == "SWAP_PLAYERS"]
+
+    assert len(swap_events) == 1
+
+    e = swap_events[0]
+
+    assert e["admin_id"] == 777
+    assert e["player_a_id"] == 1
+    assert e["player_b_id"] == 2
+    assert e["reason"] == "Manual correction"
+
+@pytest.mark.asyncio
+async def test_admin_swap_players_rejects_same_player(fresh_db):
+    guild_id = 1
+
+    await db.ladder_join_db(guild_id, 1, "Alpha")
+
+    with pytest.raises(ValueError):
+        await db.admin_swap_players(
+            guild_id=guild_id,
+            admin_id=999,
+            player_a_id=1,
+            player_b_id=1,
+            reason="Invalid",
+        )
+
+@pytest.mark.asyncio
+async def test_admin_swap_players_requires_existing_players(fresh_db):
+    guild_id = 1
+
+    await db.ladder_join_db(guild_id, 1, "Alpha")
+
+    with pytest.raises(ValueError):
+        await db.admin_swap_players(
+            guild_id=guild_id,
+            admin_id=999,
+            player_a_id=1,
+            player_b_id=2,
+            reason="Invalid",
+        )

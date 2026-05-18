@@ -408,7 +408,6 @@ Rankings are assigned.
 ```
 
 Example output:
-
 ``` bash
 Initiator cooldown: 2d
 Defender protection: 7d
@@ -441,6 +440,36 @@ Example inputs:
 10m: 10 minutes
 2h: 2 hours
 1d: 1 day
+```
+
+### Manually swap two players' ladder positions
+
+```bash
+/admin_swap_players
+```
+Example:
+```bash
+/admin_swap_players player_a:@Alpha player_b:@Beta reason:"Replay review confirmed incorrect report"
+```
+
+Parameters:
+```bash
+player_a: First player to swap.
+player_b: Second player to swap.
+reason: Explanation for the manual ladder correction.
+```
+Example outputs:
+``` bash
+The two players' ladder rankings are swapped.
+Tiers are automatically recomputed.
+Discord roles are automatically updated.
+An admin audit event is added to /history.
+```
+
+Example history entry:
+```bash
+🛠️ Admin @Moderator swapped @Alpha and @Beta
+Reason: Replay review confirmed incorrect report
 ```
 
 # Example Match Flow

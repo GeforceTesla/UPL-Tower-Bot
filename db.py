@@ -82,6 +82,17 @@ async def init_db():
                 amount INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS admin_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                admin_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                player_a_id INTEGER,
+                player_b_id INTEGER,
+                reason TEXT
+            );
             """
         )
         await db.commit()
@@ -898,3 +909,167 @@ async def settle_bets_and_rewards(guild_id: int, challenge_id: int, winner_id: i
                 payout = int(amount) * 2
                 await db.execute("UPDATE players SET balance=balance+? WHERE guild_id=? AND user_id=?", (payout, guild_id, int(bettor_id)))
         await db.commit()
+
+async def admin_swap_players(
+    guild_id: int,
+    admin_id: int,
+    player_a_id: int,
+    player_b_id: int,
+    reason: str,
+):
+    if player_a_id == player_b_id:
+        raise ValueError("Cannot swap a player with themselves.")
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT user_id, ladder_pos, is_active
+            FROM players
+            WHERE guild_id=? AND user_id IN (?, ?)
+            """,
+            (guild_id, player_a_id, player_b_id),
+        )
+        rows = await cur.fetchall()
+
+        if len(rows) != 2:
+            raise ValueError("Both players must exist in the ladder database.")
+
+        data = {int(uid): (pos, int(active)) for uid, pos, active in rows}
+
+        a_pos, a_active = data[player_a_id]
+        b_pos, b_active = data[player_b_id]
+
+        if a_active != 1 or b_active != 1:
+            raise ValueError("Both players must be active on the ladder.")
+
+        if a_pos is None or b_pos is None:
+            raise ValueError("Both players must have ladder positions.")
+
+        temp = -1
+
+        await conn.execute("BEGIN")
+
+        await conn.execute(
+            "UPDATE players SET ladder_pos=? WHERE guild_id=? AND user_id=?",
+            (temp, guild_id, player_a_id),
+        )
+        await conn.execute(
+            "UPDATE players SET ladder_pos=? WHERE guild_id=? AND user_id=?",
+            (a_pos, guild_id, player_b_id),
+        )
+        await conn.execute(
+            "UPDATE players SET ladder_pos=? WHERE guild_id=? AND user_id=?",
+            (b_pos, guild_id, player_a_id),
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO admin_events (
+                guild_id, created_at, admin_id, event_type,
+                player_a_id, player_b_id, reason
+            )
+            VALUES (?, ?, ?, 'SWAP_PLAYERS', ?, ?, ?)
+            """,
+            (
+                guild_id,
+                utcnow().isoformat(),
+                admin_id,
+                player_a_id,
+                player_b_id,
+                reason,
+            ),
+        )
+
+        await conn.commit()
+
+    await recompute_tiers_db_only(guild_id)
+
+async def list_recent_admin_events(guild_id: int, limit: int = 10) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT created_at, admin_id, event_type, player_a_id, player_b_id, reason
+            FROM admin_events
+            WHERE guild_id=?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        )
+        rows = await cur.fetchall()
+
+    return [
+        {
+            "created_at": r[0],
+            "admin_id": int(r[1]),
+            "event_type": r[2],
+            "player_a_id": int(r[3]) if r[3] is not None else None,
+            "player_b_id": int(r[4]) if r[4] is not None else None,
+            "reason": r[5],
+        }
+        for r in rows
+    ]
+
+async def get_history_events(guild_id: int, limit: int = 20) -> list[dict]:
+    events = []
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+
+        # Match history
+        cur = await conn.execute(
+            """
+            SELECT
+                played_at,
+                'MATCH',
+                challenger_id,
+                defender_id,
+                challenger_score,
+                defender_score
+            FROM matches
+            WHERE guild_id=?
+            """,
+            (guild_id,),
+        )
+        match_rows = await cur.fetchall()
+
+        for r in match_rows:
+            events.append({
+                "type": "MATCH",
+                "timestamp": r[0],
+                "challenger_id": int(r[2]),
+                "defender_id": int(r[3]),
+                "challenger_score": int(r[4]),
+                "defender_score": int(r[5]),
+            })
+
+        # Admin events
+        cur = await conn.execute(
+            """
+            SELECT
+                created_at,
+                event_type,
+                admin_id,
+                player_a_id,
+                player_b_id,
+                reason
+            FROM admin_events
+            WHERE guild_id=?
+            """,
+            (guild_id,),
+        )
+        admin_rows = await cur.fetchall()
+
+        for r in admin_rows:
+            events.append({
+                "type": r[1],
+                "timestamp": r[0],
+                "admin_id": int(r[2]),
+                "player_a_id": int(r[3]) if r[3] is not None else None,
+                "player_b_id": int(r[4]) if r[4] is not None else None,
+                "reason": r[5],
+            })
+
+    # Sort newest first
+    events.sort(key=lambda e: e["timestamp"], reverse=True)
+
+    return events[:limit]

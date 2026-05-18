@@ -73,3 +73,11 @@ def discord_ts(dt: dt.datetime) -> str:
         dt = dt.replace(tzinfo=dt.timezone.utc)
     ts = int(dt.timestamp())
     return f"<t:{ts}:F> (<t:{ts}:R>)"
+
+def discord_ts_from_iso(iso_str: str) -> str:
+    d = dt.datetime.fromisoformat(iso_str)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+
+    ts = int(d.timestamp())
+    return f"<t:{ts}:F> (<t:{ts}:R>)"
