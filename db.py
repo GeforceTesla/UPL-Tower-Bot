@@ -115,7 +115,7 @@ async def ensure_guild_settings(guild_id: int):
                 rematch_required_others,
                 bracket_size
             )
-            VALUES (?, ?, 172800, 604800, 2, 6)
+            VALUES (?, ?, 172800, 604800, 1, 6)
             """,
             (guild_id, json.dumps(DEFAULT_MAP_POOL)),
         )
