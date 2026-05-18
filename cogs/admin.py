@@ -286,5 +286,54 @@ class AdminCog(commands.Cog):
         await set_map_pool(interaction.guild.id, DEFAULT_MAP_POOL[:])
         await interaction.response.send_message(f"Server map pool reset to default (**{len(DEFAULT_MAP_POOL)}** maps).", ephemeral=True)
 
+    @app_commands.command(
+        name="admin_swap_players",
+        description="[Admin] Manually swap two players' ladder rankings."
+    )
+    @app_commands.describe(
+        player_a="First player to swap",
+        player_b="Second player to swap",
+        reason="Explanation for the manual swap"
+    )
+    async def admin_swap_players_cmd(
+        self,
+        interaction: discord.Interaction,
+        player_a: discord.Member,
+        player_b: discord.Member,
+        reason: str,
+    ):
+        assert interaction.guild
+    
+        if not is_admin_interaction(interaction.user):
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+    
+        if not reason.strip():
+            await interaction.response.send_message("Reason is required.", ephemeral=True)
+            return
+    
+        await interaction.response.defer(ephemeral=True)
+    
+        try:
+            await db.admin_swap_players(
+                interaction.guild.id,
+                interaction.user.id,
+                player_a.id,
+                player_b.id,
+                reason.strip(),
+            )
+            await recompute_and_sync_roles(self.bot, interaction.guild.id)
+        except Exception as e:
+            await interaction.followup.send(f"Failed: {e}", ephemeral=True)
+            return
+    
+        await interaction.followup.send(
+            f"Swapped ladder rankings:\n"
+            f"- {player_a.mention}\n"
+            f"- {player_b.mention}\n\n"
+            f"Reason: {reason}",
+            ephemeral=True,
+        )
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))

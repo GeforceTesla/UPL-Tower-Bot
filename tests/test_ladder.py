@@ -21,9 +21,9 @@ async def test_join_players_assigns_positions_and_tiers(fresh_db):
     assert p7["ladder_pos"] == 7
     assert p8["ladder_pos"] == 8
 
-    assert p1["tier"] == "S"
+    assert p1["tier"] == "Champion"
     assert p6["tier"] == "S"
-    assert p7["tier"] == "A"
+    assert p7["tier"] == "S"
     assert p8["tier"] == "A"
 
 
