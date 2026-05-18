@@ -543,11 +543,30 @@ async def can_challenge(guild_id: int, challenger_id: int, defender_id: int) -> 
     if de["is_active"] != 1:
         return False, "That player is withdrawn and cannot be challenged."
 
-    allowed = {ch["tier"]}
-    if ch["tier"] != "S":
-        allowed.add(TIERS[tier_index(ch["tier"]) - 1])  # one tier above
-    if de["tier"] not in allowed:
-        return False, f"Tier rule: you can only challenge same tier ({ch['tier']}) or 1 tier above."
+    challenger_pos = ch["ladder_pos"]
+    defender_pos = de["ladder_pos"]
+    # Cannot challenge downward or equal rank.
+    if defender_pos >= challenger_pos:
+        return False, "You may only challenge higher-ranked players."
+
+    challenger_tier = ch["tier"]
+    defender_tier = de["tier"]
+
+    if defender_tier == "Champion":
+        if challenger_tier != "S":
+            return False, "Only S-rank players can challenge the Champion."
+    elif challenger_tier == "Champion":
+        return False, "Champion cannot challenge upward."
+    else:
+        allowed = {challenger_tier}
+        if challenger_tier != "S":
+            allowed.add(TIERS[tier_index(challenger_tier) - 1])
+
+        if defender_tier not in allowed:
+            return False, (
+                f"Tier rule: you can only challenge same tier "
+                f"({challenger_tier}) or 1 tier above."
+            )
 
     cd = await initiator_cooldown_until(guild_id, challenger_id)
     if cd and cd > utcnow():

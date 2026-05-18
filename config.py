@@ -2,8 +2,9 @@ import os
 
 DB_PATH = os.environ.get("CHALLENGE_DB", "challenge_bot.sqlite3")
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+print(DISCORD_TOKEN)
 
-TIERS = ["S", "A", "B", "C", "D", "E", "F"]
+TIERS = ["Champion", "S", "A", "B", "C", "D", "E", "F"]
 
 DEFAULT_MAP_POOL = [
     "Fighting Spirit",

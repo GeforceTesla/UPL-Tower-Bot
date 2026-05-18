@@ -8,17 +8,22 @@ async def test_can_challenge_same_tier_and_one_above(fresh_db):
 
     # With default bracket size 6:
     # 1-6 S, 7-12 A, 13-18 B
-    for i in range(1, 15):
+    for i in range(1, 17):
         await db.ladder_join_db(guild_id, i, f"user{i}")
 
-    # user 13 is B
-    ok_same, _ = await db.can_challenge(guild_id, 13, 14)   # B -> B
-    ok_above, _ = await db.can_challenge(guild_id, 13, 12)  # B -> A
-    ok_two_above, _ = await db.can_challenge(guild_id, 13, 1)  # B -> S
+    # user 15 is B
+
+    ok_same, _ = await db.can_challenge(guild_id, 15, 14)   # B -> B
+    ok_down, _ = await db.can_challenge(guild_id, 15, 16)   # B -> B - 1
+    ok_above, _ = await db.can_challenge(guild_id, 15, 13)  # B -> A
+    ok_two_above, _ = await db.can_challenge(guild_id, 15, 2)  # B -> S
+    ok_three_above, _ = await db.can_challenge(guild_id, 15, 1)  # B -> Champion
 
     assert ok_same is True
+    assert ok_down is False
     assert ok_above is True
     assert ok_two_above is False
+    assert ok_three_above is False
 
 
 @pytest.mark.asyncio
@@ -110,12 +115,12 @@ async def test_initiator_cooldown_applies_after_match(fresh_db):
     await db.ladder_join_db(guild_id, 3, "user3")
 
     pool = await db.get_map_pool(guild_id)
-    cid = await db.create_challenge(guild_id, 2, 1, pool)
+    cid = await db.create_challenge(guild_id, 3, 2, pool)
     await db.complete_challenge_to_match(
         guild_id, cid, challenger_score=2, defender_score=0, replay_url=None, notes=None
     )
 
-    ok, reason = await db.can_challenge(guild_id, 2, 3)
+    ok, reason = await db.can_challenge(guild_id, 3, 1)
     assert ok is False
     assert "Initiator cooldown" in reason
 

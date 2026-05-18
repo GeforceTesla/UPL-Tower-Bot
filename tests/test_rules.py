@@ -38,7 +38,7 @@ async def test_bracket_size_changes_tiers(fresh_db):
 
     await db.set_rules(guild_id, bracket_size=4)
 
-    for i in range(1, 10):
+    for i in range(1, 11):
         await db.ladder_join_db(guild_id, i, f"user{i}")
 
     p1 = await db.get_player(guild_id, 1)
@@ -46,9 +46,11 @@ async def test_bracket_size_changes_tiers(fresh_db):
     p5 = await db.get_player(guild_id, 5)
     p8 = await db.get_player(guild_id, 8)
     p9 = await db.get_player(guild_id, 9)
+    p10 = await db.get_player(guild_id, 10)
 
-    assert p1["tier"] == "S"
+    assert p1["tier"] == "Champion"
     assert p4["tier"] == "S"
-    assert p5["tier"] == "A"
+    assert p5["tier"] == "S"
     assert p8["tier"] == "A"
-    assert p9["tier"] == "B"
+    assert p9["tier"] == "A"
+    assert p10["tier"] == "B"
