@@ -20,11 +20,11 @@ DEFAULT_MAP_POOL = [
 CROSSED_SWORDS = "⚔️"
 
 TIER_ROLE_NAMES = {
-    "S": "S Rankers",
-    "A": "A Floor",
-    "B": "B Floor",
-    "C": "C Floor",
-    "D": "D Floor",
-    "E": "E Floor",
-    "F": "F Floor",
+    "S": "S",
+    "A": "A",
+    "B": "B",
+    "C": "C",
+    "D": "D",
+    "E": "E",
+    "F": "F",
 }
